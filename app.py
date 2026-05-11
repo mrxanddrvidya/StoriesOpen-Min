@@ -165,39 +165,50 @@ CITIES = ["Delhi", "Mumbai", "Bangalore", "Chennai", "Kolkata", "Jaipur", "Hyder
 # ------------------- OpenRouter API -------------------
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Expanded list of models for better success rate
+# CORRECTED WORKING MODELS - Using confirmed OpenRouter model paths
 AVAILABLE_MODELS = [
-    "openrouter/auto",
-    "anthropic/claude-3.5-sonnet",
-    "anthropic/claude-3-haiku-20240307",
-    "mistralai/mixtral-8x7b-instruct",
-    "openrouter/free",
+    "mistralai/mistral-7b-instruct:free",
+    "mistralai/mixtral-8x7b-instruct:free",
     "google/gemini-2.0-flash-exp:free",
-    "google/gemini-2.0-pro-exp",
     "meta-llama/llama-3.2-3b-instruct:free",
-    "meta-llama/llama-3.3-70b-instruct",
+    "meta-llama/llama-3.2-1b-instruct:free",
     "microsoft/phi-3.5-mini-128k-instruct:free",
-    "qwen/qwen-2.5-72b-instruct",
-    "qwen/qwen-2.5-32b-instruct:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "qwen/qwen-2.5-3b-instruct:free",
     "deepseek/deepseek-r1:free",
-    "deepseek/deepseek-chat",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
-    "cohere/command-r-plus",
-    "perplexity/llama-3.1-sonar-large-128k-online"
+    "deepseek/deepseek-chat:free",
+    "nousresearch/hermes-3-llama-3.1-8b:free",
+    "huggingfaceh4/zephyr-7b-beta:free",
+    "cognitivecomputations/dolphin-mixtral-8x7b:free",
+    "openrouter/auto"
 ]
 
 def get_api_key():
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         api_key = os.getenv("OPENROUTER_KEY")
+    if not api_key:
+        # Try to get from streamlit secrets
+        try:
+            api_key = st.secrets.get("OPENROUTER_API_KEY")
+        except:
+            pass
     return api_key
 
 def call_openrouter(prompt, max_tokens=4000, temperature=0.9, frequency_penalty=0.3, presence_penalty=0.3):
     api_key = get_api_key()
     if not api_key:
-        return None, "API key not found"
+        return None, "API key not found. Please set OPENROUTER_API_KEY in environment variables or Streamlit secrets."
     
-    client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key, timeout=120.0)
+    client = OpenAI(
+        base_url=OPENROUTER_BASE_URL, 
+        api_key=api_key, 
+        timeout=120.0,
+        default_headers={
+            "HTTP-Referer": "https://indian-story-app.streamlit.app",
+            "X-Title": "Indian Story Generator"
+        }
+    )
     
     # Add unique timestamp to system prompt
     story_id = int(time.time())
@@ -228,9 +239,18 @@ Make this story COMPLETELY DIFFERENT from any previous story you've written.
     
     # Track failed models for debugging
     failed_models = []
+    successful_model = None
     
-    for model in AVAILABLE_MODELS:
+    # Shuffle models for variety and to avoid rate limits
+    models_to_try = AVAILABLE_MODELS.copy()
+    random.shuffle(models_to_try)
+    
+    for model in models_to_try:
         try:
+            # Add small delay between retries to avoid rate limits
+            if len(failed_models) > 0:
+                time.sleep(0.5)
+            
             completion = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -241,16 +261,27 @@ Make this story COMPLETELY DIFFERENT from any previous story you've written.
                 timeout=90.0
             )
             text = completion.choices[0].message.content
-            if text and len(text.strip()) > 100:  # Reduced minimum length for flexibility
+            if text and len(text.strip()) > 100:  # Minimum length check
+                successful_model = model
                 return text, None
             else:
-                failed_models.append(f"{model} (short response)")
+                failed_models.append(f"{model} (response too short: {len(text) if text else 0} chars)")
         except Exception as e:
-            failed_models.append(f"{model} ({str(e)[:50]})")
+            error_str = str(e)
+            # Log specific errors but continue
+            if "insufficient_quota" in error_str or "402" in error_str:
+                failed_models.append(f"{model} (requires payment)")
+            elif "404" in error_str:
+                failed_models.append(f"{model} (model not found)")
+            elif "429" in error_str:
+                failed_models.append(f"{model} (rate limited)")
+                time.sleep(1)  # Wait longer for rate limits
+            else:
+                failed_models.append(f"{model} ({error_str[:50]})")
             continue
     
     # If all models fail, provide detailed error
-    error_msg = f"All {len(AVAILABLE_MODELS)} models failed. Errors: {', '.join(failed_models[:5])}..."
+    error_msg = f"All {len(models_to_try)} models failed. Last errors: {', '.join(failed_models[:3])}..."
     return None, error_msg
 
 # ------------------- Story Generation with Random Elements -------------------
@@ -276,6 +307,9 @@ def generate_story(progress_callback=None, user_premise=None):
     frequency_penalty = random.uniform(0.3, 0.6)
     presence_penalty = random.uniform(0.3, 0.6)
     
+    # Lower max tokens for free models
+    max_tokens = 3000
+    
     if progress_callback:
         if user_premise:
             progress_callback(5, f"Using your premise with {male_name} and {female_name} in {city}")
@@ -289,8 +323,6 @@ Generate a COMPLETELY NEW and UNIQUE 6-chapter story outline based on this user 
 
 USER PREMISE: {user_premise}
 
-STORY ID: {int(time.time())}
-
 CHARACTERS: {male_name} (exploring femininity) and his loving partner {female_name}
 SETTING: {city}, India
 
@@ -303,16 +335,14 @@ SPECIFIC ELEMENTS for this story:
 
 Provide:
 1. A creative UNIQUE title that incorporates the user premise
-2. A detailed summary (200 words) that honors the user premise
-3. For each chapter (1-6): paragraph describing key events that follow the premise
+2. A detailed summary (150-200 words) that honors the user premise
+3. For each chapter (1-6): one sentence describing key events
 
-Make it warm, sensual, and celebratory. This must be different from any previous story.
+Keep the response concise but detailed. Make it warm and sensual.
 """
     else:
         outline_prompt = f"""
 Generate a COMPLETELY NEW and UNIQUE 6-chapter story outline.
-
-Story ID: {int(time.time())}
 
 CHARACTERS: {male_name} (exploring femininity) and his loving partner {female_name}
 SETTING: {city}, India
@@ -326,16 +356,17 @@ SPECIFIC ELEMENTS for this story:
 
 Provide:
 1. A creative UNIQUE title
-2. A detailed summary (200 words)
-3. For each chapter (1-6): paragraph describing key events
+2. A detailed summary (150-200 words)
+3. For each chapter (1-6): one sentence describing key events
 
-Make it warm, sensual, and celebratory. This must be different from any previous story.
+Keep the response concise but detailed. Make it warm and sensual.
 """
     
     if progress_callback:
         progress_callback(10, "Creating story outline...")
     
-    outline, err = call_openrouter(outline_prompt, 3000, temperature, frequency_penalty, presence_penalty)
+    outline, err = call_openrouter(outline_prompt, max_tokens=2000, temperature=temperature, 
+                                   frequency_penalty=frequency_penalty, presence_penalty=presence_penalty)
     if err:
         return None, err
     
@@ -349,57 +380,58 @@ Make it warm, sensual, and celebratory. This must be different from any previous
         
         if user_premise and user_premise.strip():
             chapter_prompt = f"""
-Write Chapter {ch} of this UNIQUE Indian story that follows the user premise.
+Write Chapter {ch} of this Indian story following the user premise.
 
 USER PREMISE: {user_premise}
 
-STORY ID: {int(time.time())}
-
 OUTLINE:
 {outline}
 
-PREVIOUS CONTEXT:
-{prev_text[-1000:] if prev_text else "Beginning of story"}
+PREVIOUS CONTEXT (last 500 chars):
+{prev_text[-500:] if prev_text else "Beginning of story"}
 
-REQUIREMENTS FOR THIS CHAPTER:
-- Describe {random_lingerie} in detail - the feel, color, how it looks
-- Describe applying {random_makeup} - the process, mirror transformation
-- Include nail care moment with {random_nails}
-- Describe wearing {random_jewelry} and {random_attire}
-- Include intimate, loving moments between {male_name} and {female_name}
-- Write 800-1000 words
-- Ensure the user premise is woven naturally into this chapter
+REQUIREMENTS for this chapter:
+- Describe {random_lingerie} - feel, color, appearance
+- Describe applying {random_makeup} - the process
+- Include {random_nails} nail care moment
+- Describe {random_jewelry} and {random_attire}
+- Write 500-700 words for free model compatibility
+- Keep the tone warm and celebratory
 
-Make this chapter UNIQUE and DIFFERENT from any previous chapter you've written.
-Write warmly and sensually. Focus on the joy of feminine expression.
+Focus on the joy of expression and intimate moments.
 """
         else:
             chapter_prompt = f"""
-Write Chapter {ch} of this UNIQUE Indian story.
-
-STORY ID: {int(time.time())}
+Write Chapter {ch} of this Indian story.
 
 OUTLINE:
 {outline}
 
-PREVIOUS CONTEXT:
-{prev_text[-1000:] if prev_text else "Beginning of story"}
+PREVIOUS CONTEXT (last 500 chars):
+{prev_text[-500:] if prev_text else "Beginning of story"}
 
-REQUIREMENTS FOR THIS CHAPTER:
-- Describe {random_lingerie} in detail - the feel, color, how it looks
-- Describe applying {random_makeup} - the process, mirror transformation
-- Include nail care moment with {random_nails}
-- Describe wearing {random_jewelry} and {random_attire}
-- Include intimate, loving moments between {male_name} and {female_name}
-- Write 800-1000 words
+REQUIREMENTS for this chapter:
+- Describe {random_lingerie} - feel, color, appearance
+- Describe applying {random_makeup} - the process
+- Include {random_nails} nail care moment
+- Describe {random_jewelry} and {random_attire}
+- Write 500-700 words for free model compatibility
+- Keep the tone warm and celebratory
 
-Make this chapter UNIQUE and DIFFERENT from any previous chapter you've written.
-Write warmly and sensually. Focus on the joy of feminine expression.
+Focus on the joy of expression and intimate moments.
 """
         
-        chapter, err = call_openrouter(chapter_prompt, 3500, temperature, frequency_penalty, presence_penalty)
+        chapter, err = call_openrouter(chapter_prompt, max_tokens=2500, temperature=temperature,
+                                       frequency_penalty=frequency_penalty, presence_penalty=presence_penalty)
         if err:
-            return None, f"Chapter {ch} failed: {err}"
+            # Try once more with a different prompt if failed
+            if progress_callback:
+                progress_callback(progress_percent, f"Retrying chapter {ch}...")
+            time.sleep(1)
+            chapter, err = call_openrouter(chapter_prompt, max_tokens=2000, temperature=temperature-0.1,
+                                          frequency_penalty=frequency_penalty, presence_penalty=presence_penalty)
+            if err:
+                return None, f"Chapter {ch} failed after retry: {err}"
         
         chapters.append(chapter)
         prev_text = chapter
@@ -465,6 +497,11 @@ def send_mp3_background(story_content, story_title):
 def send_email(story_content, story_title, mp3_path=None):
     api_key = os.getenv("RESEND_API_KEY")
     if not api_key:
+        try:
+            api_key = st.secrets.get("RESEND_API_KEY")
+        except:
+            pass
+    if not api_key:
         return False, "No API key"
     
     attachments = []
@@ -503,14 +540,14 @@ def send_email(story_content, story_title, mp3_path=None):
         return False, str(e)
 
 # ------------------- UI -------------------
-st.title("Indian Story")
+st.title("📖 Indian Story Generator")
 
 # Keep-alive notification
 st.markdown("""
 <div class="keep-alive-note">
     ⚡ <strong>Keep-Alive Active</strong> - Your browser will stay awake while generating stories.<br>
     📱 Works on mobile too! Screen won't sleep during generation.<br>
-    ⏱️ Generation takes 45-90 seconds. Please wait.
+    ⏱️ Generation takes 60-120 seconds. Please wait.
 </div>
 """, unsafe_allow_html=True)
 
@@ -554,6 +591,13 @@ if st.button("🎭 Generate Story", type="primary", use_container_width=True):
                         time_remaining.markdown(f'<div class="time-remaining">⏱️ Estimated remaining: {int(remaining)} seconds</div>', unsafe_allow_html=True)
                 else:
                     time_remaining.empty()
+            
+            # Check API key first
+            api_key = get_api_key()
+            if not api_key:
+                st.error("❌ OpenRouter API Key not found! Please add OPENROUTER_API_KEY to your environment variables or Streamlit secrets.")
+                st.session_state.generating = False
+                st.stop()
             
             # Pass user premise to generation function
             story, stats = generate_story(update_progress, user_premise if user_premise.strip() else None)
@@ -599,7 +643,7 @@ if st.button("🎭 Generate Story", type="primary", use_container_width=True):
                 status_text.markdown('<div class="status-text">Generation failed. Please try again.</div>', unsafe_allow_html=True)
                 
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error: {str(e)}")
             status_text.markdown(f'<div class="status-text">Error: {str(e)[:100]}</div>', unsafe_allow_html=True)
         
         finally:
@@ -608,7 +652,7 @@ if st.button("🎭 Generate Story", type="primary", use_container_width=True):
 # Display generated story preview
 if st.session_state.story_content:
     st.markdown("---")
-    st.subheader(f"Generated Story {st.session_state.last_gen_stats.get('hash', '') if st.session_state.last_gen_stats else ''}")
+    st.subheader(f"📖 Generated Story {st.session_state.last_gen_stats.get('hash', '') if st.session_state.last_gen_stats else ''}")
     
     display_story = re.sub(r'[*_#`>]', '', st.session_state.story_content)
     st.text_area("Story Preview", display_story[:3000], height=400)
@@ -638,21 +682,20 @@ if st.session_state.story_content:
 
 # Model information expander
 with st.expander("🔧 Connection & Model Info"):
-    st.markdown("""
-    **Available Models (Auto-failover):**
-    - Claude 3.5 Sonnet & Haiku
-    - Mixtral 8x7B
-    - Gemini 2.0 Flash & Pro
-    - Llama 3.2 & 3.3
+    st.markdown(f"""
+    **Available Free Models ({len(AVAILABLE_MODELS)} models):**
+    - Mistral 7B & Mixtral 8x7B
+    - Gemini 2.0 Flash
+    - Llama 3.2 (3B & 1B)
     - Phi-3.5 Mini
-    - Qwen 2.5
+    - Qwen 2.5 (7B & 3B)
     - DeepSeek R1 & Chat
-    - Hermes 3 405B
-    - Command R+
-    - Perplexity Llama
-    - OpenRouter Auto & Free
+    - Hermes 3 Llama
+    - Zephyr 7B Beta
+    - Dolphin Mixtral
     
-    The system automatically tries each model until one succeeds.
+    ⚡ The system automatically tries each model until one succeeds.
+    ⚡ Free models have rate limits - please be patient.
     """)
     
     col1, col2 = st.columns(2)
@@ -660,14 +703,19 @@ with st.expander("🔧 Connection & Model Info"):
         if st.button("Test OpenRouter API", use_container_width=True):
             api_key = get_api_key()
             if api_key:
-                st.success("✅ OpenRouter API Key found")
-                st.info(f"Will try {len(AVAILABLE_MODELS)} models if needed")
+                st.success(f"✅ OpenRouter API Key found (starts with: {api_key[:8]}...)")
+                st.info(f"Will try {len(AVAILABLE_MODELS)} free models")
             else:
-                st.error("❌ OpenRouter API Key missing - add OPENROUTER_API_KEY to Secrets")
+                st.error("❌ OpenRouter API Key missing - add OPENROUTER_API_KEY to Secrets or environment")
     
     with col2:
         if st.button("Test Resend API", use_container_width=True):
             resend_key = os.getenv("RESEND_API_KEY")
+            if not resend_key:
+                try:
+                    resend_key = st.secrets.get("RESEND_API_KEY")
+                except:
+                    pass
             if resend_key:
                 st.success("✅ Resend API Key found")
             else:
