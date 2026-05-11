@@ -165,12 +165,25 @@ CITIES = ["Delhi", "Mumbai", "Bangalore", "Chennai", "Kolkata", "Jaipur", "Hyder
 # ------------------- OpenRouter API -------------------
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# Expanded list of models for better success rate
 AVAILABLE_MODELS = [
     "openrouter/auto",
     "anthropic/claude-3.5-sonnet",
     "anthropic/claude-3-haiku-20240307",
     "mistralai/mixtral-8x7b-instruct",
-    "openrouter/free"
+    "openrouter/free",
+    "google/gemini-2.0-flash-exp:free",
+    "google/gemini-2.0-pro-exp",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "meta-llama/llama-3.3-70b-instruct",
+    "microsoft/phi-3.5-mini-128k-instruct:free",
+    "qwen/qwen-2.5-72b-instruct",
+    "qwen/qwen-2.5-32b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-chat",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "cohere/command-r-plus",
+    "perplexity/llama-3.1-sonar-large-128k-online"
 ]
 
 def get_api_key():
@@ -213,6 +226,9 @@ Make this story COMPLETELY DIFFERENT from any previous story you've written.
         {"role": "user", "content": prompt}
     ]
     
+    # Track failed models for debugging
+    failed_models = []
+    
     for model in AVAILABLE_MODELS:
         try:
             completion = client.chat.completions.create(
@@ -221,19 +237,25 @@ Make this story COMPLETELY DIFFERENT from any previous story you've written.
                 max_tokens=max_tokens,
                 temperature=temperature,
                 frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty
+                presence_penalty=presence_penalty,
+                timeout=90.0
             )
             text = completion.choices[0].message.content
-            if text and len(text.strip()) > 200:
+            if text and len(text.strip()) > 100:  # Reduced minimum length for flexibility
                 return text, None
-        except:
+            else:
+                failed_models.append(f"{model} (short response)")
+        except Exception as e:
+            failed_models.append(f"{model} ({str(e)[:50]})")
             continue
     
-    return None, "All models failed"
+    # If all models fail, provide detailed error
+    error_msg = f"All {len(AVAILABLE_MODELS)} models failed. Errors: {', '.join(failed_models[:5])}..."
+    return None, error_msg
 
 # ------------------- Story Generation with Random Elements -------------------
-def generate_story(progress_callback=None):
-    """Generate story with random unique elements each time"""
+def generate_story(progress_callback=None, user_premise=None):
+    """Generate story with random unique elements each time, optionally using user premise"""
     
     if progress_callback:
         progress_callback(0, "Initializing new story...")
@@ -255,10 +277,39 @@ def generate_story(progress_callback=None):
     presence_penalty = random.uniform(0.3, 0.6)
     
     if progress_callback:
-        progress_callback(5, f"Creating unique story with {male_name} and {female_name} in {city}")
+        if user_premise:
+            progress_callback(5, f"Using your premise with {male_name} and {female_name} in {city}")
+        else:
+            progress_callback(5, f"Creating unique story with {male_name} and {female_name} in {city}")
     
-    # Generate outline
-    outline_prompt = f"""
+    # Generate outline with or without user premise
+    if user_premise and user_premise.strip():
+        outline_prompt = f"""
+Generate a COMPLETELY NEW and UNIQUE 6-chapter story outline based on this user premise:
+
+USER PREMISE: {user_premise}
+
+STORY ID: {int(time.time())}
+
+CHARACTERS: {male_name} (exploring femininity) and his loving partner {female_name}
+SETTING: {city}, India
+
+SPECIFIC ELEMENTS for this story:
+- Lingerie: {random_lingerie}
+- Makeup: {random_makeup}
+- Nails: {random_nails}
+- Jewelry: {random_jewelry}
+- Traditional wear: {random_attire}
+
+Provide:
+1. A creative UNIQUE title that incorporates the user premise
+2. A detailed summary (200 words) that honors the user premise
+3. For each chapter (1-6): paragraph describing key events that follow the premise
+
+Make it warm, sensual, and celebratory. This must be different from any previous story.
+"""
+    else:
+        outline_prompt = f"""
 Generate a COMPLETELY NEW and UNIQUE 6-chapter story outline.
 
 Story ID: {int(time.time())}
@@ -296,7 +347,34 @@ Make it warm, sensual, and celebratory. This must be different from any previous
         if progress_callback:
             progress_callback(progress_percent, f"Writing chapter {ch} of 6... (Estimated {45 - (ch * 5)}s remaining)")
         
-        chapter_prompt = f"""
+        if user_premise and user_premise.strip():
+            chapter_prompt = f"""
+Write Chapter {ch} of this UNIQUE Indian story that follows the user premise.
+
+USER PREMISE: {user_premise}
+
+STORY ID: {int(time.time())}
+
+OUTLINE:
+{outline}
+
+PREVIOUS CONTEXT:
+{prev_text[-1000:] if prev_text else "Beginning of story"}
+
+REQUIREMENTS FOR THIS CHAPTER:
+- Describe {random_lingerie} in detail - the feel, color, how it looks
+- Describe applying {random_makeup} - the process, mirror transformation
+- Include nail care moment with {random_nails}
+- Describe wearing {random_jewelry} and {random_attire}
+- Include intimate, loving moments between {male_name} and {female_name}
+- Write 800-1000 words
+- Ensure the user premise is woven naturally into this chapter
+
+Make this chapter UNIQUE and DIFFERENT from any previous chapter you've written.
+Write warmly and sensually. Focus on the joy of feminine expression.
+"""
+        else:
+            chapter_prompt = f"""
 Write Chapter {ch} of this UNIQUE Indian story.
 
 STORY ID: {int(time.time())}
@@ -336,6 +414,8 @@ Write warmly and sensually. Focus on the joy of feminine expression.
     story_title = title_match.group(1).strip() if title_match else f"Indian Love Story #{int(time.time())}"
     
     full_story = f"Title: {story_title}\n\n"
+    if user_premise and user_premise.strip():
+        full_story += f"Based on premise: {user_premise}\n\n"
     for i, chapter in enumerate(chapters, 1):
         full_story += f"\n\n## Chapter {i}\n\n{chapter}\n\n---\n"
     
@@ -434,13 +514,22 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# User premise input area
+st.markdown("### 📝 Your Story Premise (Optional)")
+user_premise = st.text_area(
+    "Paste your story idea or premise here...",
+    height=120,
+    placeholder="Example: A story about a man who discovers his love for traditional Indian dance and how his wife supports him in embracing his feminine side through clothing and makeup...",
+    help="Leave empty for a completely random story. The more detail you provide, the more personalized your story will be!"
+)
+
 # Progress display area
 progress_bar = st.progress(0)
 status_text = st.empty()
 time_remaining = st.empty()
 
 # Generate button
-if st.button("🎭 Generate Unique Story", type="primary", use_container_width=True):
+if st.button("🎭 Generate Story", type="primary", use_container_width=True):
     if st.session_state.generating:
         st.warning("⚠️ Story generation already in progress. Please wait...")
     else:
@@ -466,12 +555,18 @@ if st.button("🎭 Generate Unique Story", type="primary", use_container_width=T
                 else:
                     time_remaining.empty()
             
-            story, stats = generate_story(update_progress)
+            # Pass user premise to generation function
+            story, stats = generate_story(update_progress, user_premise if user_premise.strip() else None)
             
             if story and stats:
                 progress_bar.progress(1.0)
                 status_text.markdown('<div class="status-text">✅ Story complete! Sending email...</div>', unsafe_allow_html=True)
-                st.success(f"✅ Story generated! {stats['words']:,} words, {stats['chapters']} chapters\n📖 Story ID: {stats.get('hash', 'N/A')}")
+                
+                # Show premise used message
+                if user_premise and user_premise.strip():
+                    st.success(f"✅ Story generated based on your premise! {stats['words']:,} words, {stats['chapters']} chapters\n📖 Story ID: {stats.get('hash', 'N/A')}")
+                else:
+                    st.success(f"✅ Story generated! {stats['words']:,} words, {stats['chapters']} chapters\n📖 Story ID: {stats.get('hash', 'N/A')}")
                 
                 # Send email with story
                 status_text.markdown('<div class="status-text">📧 Sending story via email...</div>', unsafe_allow_html=True)
@@ -541,14 +636,32 @@ if st.session_state.story_content:
             st.session_state.current_status = ""
             st.rerun()
 
-# Test connection buttons (collapsible)
-with st.expander("🔧 Connection Test"):
+# Model information expander
+with st.expander("🔧 Connection & Model Info"):
+    st.markdown("""
+    **Available Models (Auto-failover):**
+    - Claude 3.5 Sonnet & Haiku
+    - Mixtral 8x7B
+    - Gemini 2.0 Flash & Pro
+    - Llama 3.2 & 3.3
+    - Phi-3.5 Mini
+    - Qwen 2.5
+    - DeepSeek R1 & Chat
+    - Hermes 3 405B
+    - Command R+
+    - Perplexity Llama
+    - OpenRouter Auto & Free
+    
+    The system automatically tries each model until one succeeds.
+    """)
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Test OpenRouter API", use_container_width=True):
             api_key = get_api_key()
             if api_key:
                 st.success("✅ OpenRouter API Key found")
+                st.info(f"Will try {len(AVAILABLE_MODELS)} models if needed")
             else:
                 st.error("❌ OpenRouter API Key missing - add OPENROUTER_API_KEY to Secrets")
     
